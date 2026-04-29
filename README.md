@@ -38,6 +38,7 @@ deep-claude
 deep-claude --model flash
 deep-claude --model pro
 deep-claude -p "hello"
+deep-claude --model flash -- -p "hello from flash"
 ```
 
 `pro` is the default model.
@@ -53,7 +54,7 @@ You can also pass a full model name:
 deep-claude --model deepseek-v4-pro
 ```
 
-All other arguments are passed through to `claude`.
+All other arguments are passed through to `claude`. Use `--` if you want to stop `deep-claude` option parsing explicitly.
 
 ## How It Stays Isolated
 

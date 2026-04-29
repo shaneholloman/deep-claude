@@ -37,6 +37,13 @@ args=()
 
 while (($#)); do
   case "$1" in
+    --)
+      shift
+      while (($#)); do
+        args+=("$1")
+        shift
+      done
+      ;;
     --help|-h)
       usage
       exit 0
