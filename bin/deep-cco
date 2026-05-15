@@ -49,6 +49,12 @@ if [[ -f "$ENV_FILE" ]]; then
   set +a
 fi
 
+# Treat the .env.example placeholder as unset, so a stale .env can't shadow
+# a real key in Keychain or shell env.
+if [[ "${DEEPSEEK_API_KEY:-}" == "sk-..." ]]; then
+  unset DEEPSEEK_API_KEY
+fi
+
 # Fall back to macOS Keychain when DEEPSEEK_API_KEY isn't set via env or .env.
 if [[ -z "${DEEPSEEK_API_KEY:-}" ]] && command -v security >/dev/null 2>&1; then
   if keychain_key="$(security find-generic-password -s deep-claude -a deepseek -w 2>/dev/null)"; then
