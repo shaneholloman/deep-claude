@@ -102,10 +102,20 @@ if [[ -z "$api_key" ]]; then
 fi
 
 cco_bin="${CCO_BIN:-cco}"
-if ! command -v "$cco_bin" >/dev/null 2>&1; then
+if ! cco_resolved="$(command -v "$cco_bin")"; then
   echo "deep-cco: '$cco_bin' is not on PATH. Install from https://github.com/nikvdp/cco" >&2
   exit 1
 fi
+
+# Resolve cco's symlinks ourselves: cco infers its installation dir from
+# $HOME and from $(dirname "${BASH_SOURCE[0]}"), and we're about to redirect
+# $HOME below. Without this, cco invoked via a ~/.local/bin/cco symlink fails
+# to find its lib/ directory.
+while [ -L "$cco_resolved" ]; do
+  cco_dir="$(cd -P "$(dirname "$cco_resolved")" >/dev/null 2>&1 && pwd)"
+  cco_resolved="$(readlink "$cco_resolved")"
+  [[ "$cco_resolved" != /* ]] && cco_resolved="$cco_dir/$cco_resolved"
+done
 
 mkdir -p "$STATE_DIR/home" "$STATE_DIR/config" "$STATE_DIR/cache" "$STATE_DIR/data" "$STATE_DIR/state"
 
@@ -121,7 +131,7 @@ export ANTHROPIC_API_KEY="$api_key"
 export ANTHROPIC_MODEL="$model"
 
 if ((${#passthrough[@]})); then
-  exec "$cco_bin" --model "$model" "${passthrough[@]}"
+  exec "$cco_resolved" --model "$model" "${passthrough[@]}"
 else
-  exec "$cco_bin" --model "$model"
+  exec "$cco_resolved" --model "$model"
 fi
