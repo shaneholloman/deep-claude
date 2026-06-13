@@ -70,6 +70,7 @@ Both wrappers share the same state directory, so DeepSeek session history is con
 - [Quickstart](#quickstart)
 - [Configuring the API key](#configuring-the-api-key)
 - [Usage](#usage)
+- [OpenRouter mode](#openrouter-mode)
 - [How it works](#how-it-works)
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
@@ -175,6 +176,60 @@ deep-cco -- -p 3000:3000       # pass args through to cco's underlying sandbox b
 
 `--model` is consumed locally; everything else flows to `cco` (and then to `claude` per cco's rules). See [cco's README](https://github.com/nikvdp/cco) for sandbox flags like `--safe`, `--add-dir`, `--allow-readonly`, and `--deny-path`.
 
+## OpenRouter mode
+
+`deep-claude --open-router` points Claude Code at [OpenRouter](https://openrouter.ai) instead of DeepSeek, so you can drive the same harness with Gemini, GPT, DeepSeek, Grok, Qwen, Claude, and anything else OpenRouter serves — including a curated `/model` picker and per-sub-agent model selection.
+
+It works because OpenRouter exposes a **native Anthropic Messages endpoint** (`/api/v1/messages`) that accepts any model on the platform. A tiny local proxy (`bin/deep-router-proxy`, no dependencies beyond `node`) sits in front of it to (1) advertise only your curated model list to Claude Code's `/model` picker, and (2) strip the Anthropic-only `context_management` field that 400s on non-Claude models.
+
+### Setup
+
+Store your OpenRouter key (env, `.env`, or Keychain):
+
+```bash
+security add-generic-password -s deep-router -a openrouter -U -w   # macOS Keychain
+# …or put OPENROUTER_API_KEY=sk-or-... in .env
+```
+
+Curate the models you want to expose:
+
+```bash
+deep-router models add google/gemini-3.5-flash      gemini
+deep-router models add anthropic/claude-opus-4.8    opus
+deep-router models add deepseek/deepseek-v4-flash   deepseek
+deep-router models default gemini
+deep-router models list
+```
+
+(Model ids change over time — check [openrouter.ai/models](https://openrouter.ai/models) for current slugs.)
+
+### Use
+
+```bash
+deep-claude --open-router                          # uses ROUTER_DEFAULT_MODEL
+deep-claude --open-router --model opus             # by alias
+deep-claude --open-router --model x-ai/grok-4.1    # or a full OpenRouter id
+deep-claude --or -p "explain this repo"            # --or is shorthand
+```
+
+> **Non-Claude reasoning models:** OpenRouter's Anthropic skin injects (out-of-order) `redacted_thinking` blocks for models like Gemini, which would otherwise make Claude Code show an empty response. `deep-router-proxy` strips those blocks for non-`anthropic/` models so the visible text comes through; genuine Claude models pass through untouched. Disable with `ROUTER_KEEP_THINKING=1`.
+
+Inside the session, `/model` lists exactly your curated set (via gateway discovery). And because a sub-agent's `model:` frontmatter accepts a full model id, a single workflow can run **many** OpenRouter models at once — the orchestrator on one model, sub-agents pinned to others.
+
+### Curate
+
+| Command | Effect |
+| --- | --- |
+| `deep-router models add <id> [alias]` | Add an OpenRouter model id (optionally with a `--model` alias) |
+| `deep-router models remove <id\|alias>` | Drop a model (removing an alias also drops its model) |
+| `deep-router models default <alias\|id>` | Set the model used when `--model` is omitted |
+| `deep-router models list` | Show the curated set, aliases, and default |
+| `deep-router serve` | Run the proxy in the foreground (rarely needed; `--open-router` boots it for you) |
+
+These edit `ROUTER_MODELS` / `ROUTER_ALIASES` / `ROUTER_DEFAULT_MODEL` in `.env`.
+
+> **Note:** OpenRouter recommends pinning the Anthropic first-party provider for genuine Claude models; non-Claude models work but won't honor Claude-only features like prompt caching.
+
 ## How it works
 
 Both wrappers set the same environment variables:
@@ -194,13 +249,16 @@ ANTHROPIC_MODEL=<selected model>
 
 | Path                       | Purpose                                                                  |
 | -------------------------- | ------------------------------------------------------------------------ |
-| `bin/deep-claude`          | The wrapper script                                                       |
+| `bin/deep-claude`          | The wrapper script (DeepSeek, or OpenRouter with `--open-router`)        |
 | `bin/deep-cco`             | The sandboxed wrapper                                                    |
-| `deep-claude`, `deep-cco`  | Top-level shims that `exec bin/...` — handy for `./deep-claude` from the repo |
-| `install.sh`               | Symlinks both into `~/.local/bin`                                        |
-| `test.sh`                  | Syntax and arg-passthrough tests                                         |
-| `.env.example`             | Template; copy to `.env` to set the API key in a file                    |
-| `.deep-claude-home/`       | gitignored; created on first run; holds isolated Claude Code state       |
+| `bin/deep-router`          | Curation CLI (`models add/remove/list/default`) + `serve`               |
+| `bin/deep-router-proxy`    | The Node Anthropic→OpenRouter passthrough proxy                          |
+| `deep-claude`, `deep-cco`, `deep-router` | Top-level shims that `exec bin/...`                        |
+| `install.sh`               | Symlinks `deep-claude`, `deep-cco`, `deep-router` into `~/.local/bin`    |
+| `test.sh`                  | Syntax, arg-passthrough, and live proxy tests                            |
+| `.env.example`             | Template; copy to `.env` to set keys and the curated model set           |
+| `.deep-claude-home/`       | gitignored; isolated Claude Code state for DeepSeek mode                 |
+| `.deep-router-home/`       | gitignored; isolated Claude Code state for OpenRouter mode               |
 
 ## Troubleshooting
 

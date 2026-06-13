@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# deep-router — manage the curated OpenRouter model set and (optionally) run the
+# proxy standalone. The proxy itself lives in bin/deep-router-proxy and is
+# normally booted for you by `deep-claude --open-router`.
+#
+#   deep-router models list
+#   deep-router models add <openrouter/model-id> [alias]
+#   deep-router models remove <id|alias>
+#   deep-router models default <alias|id>
+#   deep-router serve                 # run the proxy in the foreground
+#
+# The curated list lives in .env as ROUTER_MODELS / ROUTER_ALIASES /
+# ROUTER_DEFAULT_MODEL, which `deep-claude --open-router` reads. Override the
+# file with DEEP_ROUTER_ENV_FILE.
+
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+PROJECT_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+ENV_FILE="${DEEP_ROUTER_ENV_FILE:-$PROJECT_DIR/.env}"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  deep-router models list
+  deep-router models add <openrouter/model-id> [alias]
+  deep-router models remove <id|alias>
+  deep-router models default <alias|id>
+  deep-router serve
+
+`add`/`remove`/`default` edit the curated set in .env (ROUTER_MODELS,
+ROUTER_ALIASES, ROUTER_DEFAULT_MODEL). Then launch with:
+  deep-claude --open-router --model <alias>
+EOF
+}
+
+# --- .env get/set (pure bash, comma-list aware) ----------------------------
+
+env_get() {
+  # env_get KEY  -> prints the last KEY=... value in $ENV_FILE (unquoted)
+  local key="$1" line val=""
+  [[ -f "$ENV_FILE" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" == "$key="* ]] && val="${line#"$key"=}"
+  done <"$ENV_FILE"
+  # strip a single layer of surrounding quotes
+  val="${val%\"}"
+  val="${val#\"}"
+  printf '%s' "$val"
+}
+
+env_set() {
+  # env_set KEY VALUE  -> upsert KEY=VALUE in $ENV_FILE, preserving other lines
+  local key="$1" value="$2" tmp found=0 line
+  [[ -f "$ENV_FILE" ]] || : >"$ENV_FILE"
+  tmp="$(mktemp)"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == "$key="* ]]; then
+      printf '%s=%s\n' "$key" "$value" >>"$tmp"
+      found=1
+    else
+      printf '%s\n' "$line" >>"$tmp"
+    fi
+  done <"$ENV_FILE"
+  ((found)) || printf '%s=%s\n' "$key" "$value" >>"$tmp"
+  mv "$tmp" "$ENV_FILE"
+}
+
+# join the remaining args with commas, dropping empties
+join_csv() {
+  local out="" item
+  for item in "$@"; do
+    [[ -z "$item" ]] && continue
+    out="${out:+$out,}$item"
+  done
+  printf '%s' "$out"
+}
+
+models_list() {
+  local models aliases def
+  models="$(env_get ROUTER_MODELS)"
+  aliases="$(env_get ROUTER_ALIASES)"
+  def="$(env_get ROUTER_DEFAULT_MODEL)"
+  echo "Curated models (ROUTER_MODELS):"
+  if [[ -n "$models" ]]; then
+    IFS=',' read -ra arr <<<"$models"
+    for m in ${arr[@]+"${arr[@]}"}; do [[ -n "${m// /}" ]] && echo "  ${m// /}"; done
+  else
+    echo "  (none)"
+  fi
+  echo "Aliases (ROUTER_ALIASES):"
+  if [[ -n "$aliases" ]]; then
+    IFS=',' read -ra arr <<<"$aliases"
+    for a in ${arr[@]+"${arr[@]}"}; do [[ -n "${a// /}" ]] && echo "  ${a// /}"; done
+  else
+    echo "  (none)"
+  fi
+  echo "Default (ROUTER_DEFAULT_MODEL): ${def:-(none)}"
+}
+
+models_add() {
+  local id="$1" alias="${2:-}"
+  [[ -z "$id" ]] && {
+    echo "deep-router: 'models add' needs an OpenRouter model id" >&2
+    exit 2
+  }
+  # ROUTER_MODELS: append id if absent.
+  local cur kept=() m
+  cur="$(env_get ROUTER_MODELS)"
+  IFS=',' read -ra arr <<<"$cur"
+  for m in ${arr[@]+"${arr[@]}"}; do
+    m="${m// /}"
+    [[ -z "$m" || "$m" == "$id" ]] && continue
+    kept+=("$m")
+  done
+  kept+=("$id")
+  env_set ROUTER_MODELS "$(join_csv ${kept[@]+"${kept[@]}"})"
+
+  # ROUTER_ALIASES: replace any existing alias=... with the same key.
+  if [[ -n "$alias" ]]; then
+    local acur akept=() p
+    acur="$(env_get ROUTER_ALIASES)"
+    IFS=',' read -ra aarr <<<"$acur"
+    for p in ${aarr[@]+"${aarr[@]}"}; do
+      p="${p// /}"
+      [[ -z "$p" || "${p%%=*}" == "$alias" ]] && continue
+      akept+=("$p")
+    done
+    akept+=("$alias=$id")
+    env_set ROUTER_ALIASES "$(join_csv ${akept[@]+"${akept[@]}"})"
+  fi
+  echo "Added ${id}${alias:+ (alias: $alias)}."
+  models_list
+}
+
+models_remove() {
+  local token="$1"
+  [[ -z "$token" ]] && {
+    echo "deep-router: 'models remove' needs an id or alias" >&2
+    exit 2
+  }
+  # Resolve an alias to its id so removing by alias also drops the model.
+  local acur p akept=() target="$token"
+  acur="$(env_get ROUTER_ALIASES)"
+  IFS=',' read -ra aarr <<<"$acur"
+  for p in ${aarr[@]+"${aarr[@]}"}; do
+    p="${p// /}"
+    [[ -z "$p" ]] && continue
+    if [[ "${p%%=*}" == "$token" ]]; then target="${p#*=}"; fi
+  done
+  # Drop matching alias entries (by key or value).
+  akept=()
+  for p in ${aarr[@]+"${aarr[@]}"}; do
+    p="${p// /}"
+    [[ -z "$p" ]] && continue
+    [[ "${p%%=*}" == "$token" || "${p#*=}" == "$target" ]] && continue
+    akept+=("$p")
+  done
+  env_set ROUTER_ALIASES "$(join_csv ${akept[@]+"${akept[@]}"})"
+  # Drop the model id.
+  local cur kept=() m
+  cur="$(env_get ROUTER_MODELS)"
+  IFS=',' read -ra arr <<<"$cur"
+  for m in ${arr[@]+"${arr[@]}"}; do
+    m="${m// /}"
+    [[ -z "$m" || "$m" == "$target" || "$m" == "$token" ]] && continue
+    kept+=("$m")
+  done
+  env_set ROUTER_MODELS "$(join_csv ${kept[@]+"${kept[@]}"})"
+  echo "Removed ${token}."
+  models_list
+}
+
+models_default() {
+  local token="$1"
+  [[ -z "$token" ]] && {
+    echo "deep-router: 'models default' needs an alias or id" >&2
+    exit 2
+  }
+  env_set ROUTER_DEFAULT_MODEL "$token"
+  echo "Default model set to ${token}."
+}
+
+cmd="${1:-serve}"
+[[ $# -gt 0 ]] && shift || true
+
+case "$cmd" in
+  serve | "")
+    exec node "$SCRIPT_DIR/deep-router-proxy" "$@"
+    ;;
+  models)
+    sub="${1:-list}"
+    [[ $# -gt 0 ]] && shift || true
+    case "$sub" in
+      list) models_list ;;
+      add) models_add "${1:-}" "${2:-}" ;;
+      remove | rm) models_remove "${1:-}" ;;
+      default) models_default "${1:-}" ;;
+      *)
+        echo "deep-router: unknown 'models' subcommand: $sub" >&2
+        usage
+        exit 2
+        ;;
+    esac
+    ;;
+  -h | --help | help)
+    usage
+    ;;
+  *)
+    echo "deep-router: unknown command: $cmd" >&2
+    usage
+    exit 2
+    ;;
+esac

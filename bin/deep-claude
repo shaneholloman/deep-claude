@@ -12,28 +12,35 @@ SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
 PROJECT_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 ENV_FILE="$PROJECT_DIR/.env"
 STATE_DIR="$PROJECT_DIR/.deep-claude-home"
+ROUTER_STATE_DIR="$PROJECT_DIR/.deep-router-home"
 
 usage() {
   cat <<'EOF'
 Usage: deep-claude [--model pro|flash|MODEL] [claude args...]
+       deep-claude --open-router [--model ALIAS|MODEL] [claude args...]
 
-Runs Claude Code against DeepSeek's Anthropic-compatible endpoint.
+Runs Claude Code against DeepSeek (default) or, with --open-router, against
+OpenRouter via the local deep-router proxy.
 
 Defaults:
   --model pro     deepseek-v4-pro
 
-Aliases:
+Aliases (DeepSeek mode):
   --model pro     deepseek-v4-pro
   --model flash   deepseek-v4-flash
 
+OpenRouter mode (--open-router / --or):
+  Boots bin/deep-router-proxy and points Claude Code at it, so the /model
+  picker shows only your curated models (gateway discovery) and any model in
+  your allow-list is reachable. --model takes a ROUTER_ALIASES name or a full
+  OpenRouter model id; it defaults to ROUTER_DEFAULT_MODEL.
+  Curate the list with:  deep-router models add <id> [alias]
+
 Environment:
-  DEEPSEEK_API_KEY may be supplied via (in precedence order):
-    1. exported in the shell
-    2. .env next to this repo
-    3. macOS Keychain item: service "deep-claude", account "deepseek"
-       Add with:
-         security add-generic-password -s deep-claude -a deepseek -U -w
-  CLAUDE_BIN may be set to override the claude executable.
+  DEEPSEEK_API_KEY    DeepSeek key (env, .env, or Keychain -s deep-claude -a deepseek).
+  OPENROUTER_API_KEY  OpenRouter key for --open-router (env, .env, or
+                        Keychain -s deep-router -a openrouter).
+  CLAUDE_BIN          override the claude executable.
 EOF
 }
 
@@ -43,6 +50,170 @@ if [[ -f "$ENV_FILE" ]]; then
   source "$ENV_FILE"
   set +a
 fi
+
+open_router=0
+model_arg=""
+args=()
+
+while (($#)); do
+  case "$1" in
+    --)
+      shift
+      while (($#)); do
+        args+=("$1")
+        shift
+      done
+      ;;
+    --help | -h)
+      usage
+      exit 0
+      ;;
+    --open-router | --openrouter | --or)
+      open_router=1
+      shift
+      ;;
+    --model)
+      if (($# < 2)); then
+        echo "deep-claude: --model requires a value: pro, flash, or a full model name" >&2
+        exit 2
+      fi
+      model_arg="$2"
+      shift 2
+      ;;
+    --model=*)
+      model_arg="${1#--model=}"
+      shift
+      ;;
+    *)
+      args+=("$1")
+      shift
+      ;;
+  esac
+done
+
+# ---------------------------------------------------------------------------
+# OpenRouter mode: boot the proxy, point Claude Code at it, curated picker on.
+# ---------------------------------------------------------------------------
+if ((open_router)); then
+  # Treat the .env.example placeholder as unset.
+  if [[ "${OPENROUTER_API_KEY:-}" == "sk-or-..." ]]; then
+    unset OPENROUTER_API_KEY
+  fi
+  # Fall back to macOS Keychain (service "deep-router", account "openrouter").
+  if [[ -z "${OPENROUTER_API_KEY:-}" ]] && command -v security >/dev/null 2>&1; then
+    if keychain_key="$(security find-generic-password -s deep-router -a openrouter -w 2>/dev/null)"; then
+      export OPENROUTER_API_KEY="$keychain_key"
+    fi
+  fi
+  if [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
+    echo "deep-claude: missing OPENROUTER_API_KEY for --open-router." >&2
+    echo "  Set it in the shell, in $ENV_FILE, or store it in macOS Keychain:" >&2
+    echo "    security add-generic-password -s deep-router -a openrouter -U -w" >&2
+    exit 1
+  fi
+
+  # Resolve the model: a ROUTER_ALIASES name, a full id, or ROUTER_DEFAULT_MODEL.
+  model="${model_arg:-${ROUTER_DEFAULT_MODEL:-}}"
+  if [[ -n "${ROUTER_ALIASES:-}" ]]; then
+    IFS=',' read -ra _pairs <<<"$ROUTER_ALIASES"
+    for _p in "${_pairs[@]}"; do
+      _p="${_p// /}"
+      [[ -z "$_p" ]] && continue
+      if [[ "${_p%%=*}" == "$model" ]]; then
+        model="${_p#*=}"
+        break
+      fi
+    done
+  fi
+  if [[ -z "$model" ]]; then
+    echo "deep-claude: no model selected. Pass --model NAME or set ROUTER_DEFAULT_MODEL." >&2
+    exit 1
+  fi
+
+  if ! command -v node >/dev/null 2>&1; then
+    echo "deep-claude: node is required to run the deep-router proxy but was not found on PATH." >&2
+    exit 1
+  fi
+
+  PORT="${ROUTER_PORT:-8787}"
+  HOST="${ROUTER_HOST:-127.0.0.1}"
+
+  mkdir -p "$ROUTER_STATE_DIR/home" "$ROUTER_STATE_DIR/config" \
+    "$ROUTER_STATE_DIR/cache" "$ROUTER_STATE_DIR/data" "$ROUTER_STATE_DIR/state"
+
+  # Start the proxy in the background; the key is passed via the environment so
+  # it never reaches the Node process via argv.
+  ROUTER_PORT="$PORT" ROUTER_HOST="$HOST" OPENROUTER_API_KEY="$OPENROUTER_API_KEY" \
+    node "$SCRIPT_DIR/deep-router-proxy" &
+  ROUTER_PID=$!
+
+  cleanup() {
+    kill "$ROUTER_PID" 2>/dev/null || true
+    wait "$ROUTER_PID" 2>/dev/null || true
+  }
+  trap cleanup EXIT INT TERM
+
+  ready=""
+  for _ in $(seq 1 50); do
+    if curl -fsS "http://$HOST:$PORT/health" >/dev/null 2>&1; then
+      ready=1
+      break
+    fi
+    if ! kill -0 "$ROUTER_PID" 2>/dev/null; then
+      echo "deep-claude: deep-router proxy exited before becoming ready." >&2
+      exit 1
+    fi
+    sleep 0.1
+  done
+  if [[ -z "$ready" ]]; then
+    echo "deep-claude: deep-router proxy did not become ready on http://$HOST:$PORT" >&2
+    exit 1
+  fi
+
+  # Isolate Claude Code's state (separate from the DeepSeek home) without
+  # hijacking $HOME — see the DeepSeek branch below for the rationale.
+  export CLAUDE_CONFIG_DIR="$ROUTER_STATE_DIR/home/.claude"
+  export XDG_CONFIG_HOME="$ROUTER_STATE_DIR/config"
+  export XDG_CACHE_HOME="$ROUTER_STATE_DIR/cache"
+  export XDG_DATA_HOME="$ROUTER_STATE_DIR/data"
+  export XDG_STATE_HOME="$ROUTER_STATE_DIR/state"
+
+  export ANTHROPIC_BASE_URL="http://$HOST:$PORT"
+  export ANTHROPIC_AUTH_TOKEN="router"
+  # Must be explicitly empty: a non-empty ANTHROPIC_API_KEY makes Claude Code
+  # prompt "Detected a custom API key…" on first run. The proxy injects the real
+  # OpenRouter key server-side, so the client token is just a non-empty bearer.
+  export ANTHROPIC_API_KEY=""
+  export ANTHROPIC_MODEL="$model"
+  export ANTHROPIC_DEFAULT_OPUS_MODEL="$model"
+  export ANTHROPIC_DEFAULT_SONNET_MODEL="$model"
+  export ANTHROPIC_DEFAULT_HAIKU_MODEL="$model"
+  export ANTHROPIC_SMALL_FAST_MODEL="$model"
+
+  # Populate the /model picker from the proxy's curated /v1/models, and drop the
+  # experimental betas (context-management 400s on non-Claude OpenRouter models;
+  # the proxy strips it too as a backstop).
+  export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY="1"
+  export CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS="1"
+
+  # Run without exec so the trap can tear the proxy down afterwards.
+  if ((${#args[@]})); then
+    "${CLAUDE_BIN:-claude}" --model "$model" "${args[@]}"
+  else
+    "${CLAUDE_BIN:-claude}" --model "$model"
+  fi
+  exit $?
+fi
+
+# ---------------------------------------------------------------------------
+# DeepSeek mode (default).
+# ---------------------------------------------------------------------------
+case "${model_arg:-}" in
+  "") model="deepseek-v4-pro" ;;
+  pro) model="deepseek-v4-pro" ;;
+  flash) model="deepseek-v4-flash" ;;
+  *) model="$model_arg" ;;
+esac
 
 # Treat the .env.example placeholder as unset, so a stale .env can't shadow
 # a real key in Keychain or shell env.
@@ -57,50 +228,6 @@ if [[ -z "${DEEPSEEK_API_KEY:-}" ]] && command -v security >/dev/null 2>&1; then
   fi
 fi
 
-model="deepseek-v4-pro"
-args=()
-
-while (($#)); do
-  case "$1" in
-    --)
-      shift
-      while (($#)); do
-        args+=("$1")
-        shift
-      done
-      ;;
-    --help|-h)
-      usage
-      exit 0
-      ;;
-    --model)
-      if (($# < 2)); then
-        echo "deep-claude: --model requires a value: pro, flash, or a full model name" >&2
-        exit 2
-      fi
-      case "$2" in
-        pro) model="deepseek-v4-pro" ;;
-        flash) model="deepseek-v4-flash" ;;
-        *) model="$2" ;;
-      esac
-      shift 2
-      ;;
-    --model=*)
-      value="${1#--model=}"
-      case "$value" in
-        pro) model="deepseek-v4-pro" ;;
-        flash) model="deepseek-v4-flash" ;;
-        *) model="$value" ;;
-      esac
-      shift
-      ;;
-    *)
-      args+=("$1")
-      shift
-      ;;
-  esac
-done
-
 api_key="${DEEPSEEK_API_KEY:-}"
 if [[ -z "$api_key" ]]; then
   echo "deep-claude: missing DEEPSEEK_API_KEY." >&2
@@ -111,7 +238,18 @@ fi
 
 mkdir -p "$STATE_DIR/home" "$STATE_DIR/config" "$STATE_DIR/cache" "$STATE_DIR/data" "$STATE_DIR/state"
 
-export HOME="$STATE_DIR/home"
+# Isolate Claude Code's state without hijacking $HOME.
+#
+# We deliberately do NOT override HOME. On macOS the login keychain lives at
+# $HOME/Library/Keychains, so overriding HOME breaks any tool that reads/writes
+# it from inside a session — `gh`, git-credential-osxkeychain, etc. (symptom:
+# "a keychain cannot be found to store ...").
+#
+# Instead, isolate Claude Code via CLAUDE_CONFIG_DIR (its purpose-built knob),
+# pointed at the existing sandbox location so prior DeepSeek session history
+# carries over. XDG_* still redirect other XDG-respecting tools' state into the
+# sandbox; none of these affect keychain access.
+export CLAUDE_CONFIG_DIR="$STATE_DIR/home/.claude"
 export XDG_CONFIG_HOME="$STATE_DIR/config"
 export XDG_CACHE_HOME="$STATE_DIR/cache"
 export XDG_DATA_HOME="$STATE_DIR/data"
