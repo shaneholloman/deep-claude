@@ -1,23 +1,23 @@
 #!/usr/bin/env node
 'use strict';
 
-// deep-router-pick — a full-screen interactive picker for choosing which
-// OpenRouter models to expose through deep-router. No dependencies.
+// deep-claude-pick — a full-screen interactive picker for choosing which
+// OpenRouter models to expose. No dependencies.
 //
-// Env (set by the `deep-router pick` wrapper):
+// Env (set by the `deep-claude pick` wrapper):
 //   OPENROUTER_API_KEY    required — used to fetch the model catalog.
-//   DEEP_ROUTER_ENV_FILE  the .env file to write ROUTER_* into.
+//   DEEP_CLAUDE_ENV_FILE  the .env file to write ROUTER_* into.
 //   OPENROUTER_BASE_URL   optional upstream root (default https://openrouter.ai/api).
 //
 // Stages: (1) multi-select models with live search, (2) pick the default.
 // Aliases are auto-derived from each model id (editable later via
-// `deep-router models add <id> <alias>`). Writes ROUTER_MODELS / ROUTER_ALIASES
+// `deep-claude models add <id> <alias>`). Writes ROUTER_MODELS / ROUTER_ALIASES
 // / ROUTER_DEFAULT_MODEL.
 
 const fs = require('fs');
 
 const API_KEY = process.env.OPENROUTER_API_KEY || '';
-const ENV_FILE = process.env.DEEP_ROUTER_ENV_FILE || '.env';
+const ENV_FILE = process.env.DEEP_CLAUDE_ENV_FILE || '.env';
 const BASE = (process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api').replace(/\/+$/, '');
 
 const out = process.stdout;
@@ -28,7 +28,7 @@ const C = {
 };
 
 function fail(msg) {
-  out.write(`\n${C.red}deep-router pick: ${msg}${C.reset}\n`);
+  out.write(`\n${C.red}deep-claude pick: ${msg}${C.reset}\n`);
   process.exit(1);
 }
 
@@ -245,7 +245,7 @@ async function main() {
     const mark = id === defModel ? `${C.yellow} (default)${C.reset}` : '';
     out.write(`  ${C.green}${al.padEnd(18)}${C.reset}${C.gray}→${C.reset} ${id}${mark}\n`);
   }
-  out.write(`\nRun:  ${C.bold}deep-claude --open-router --model ${defAlias}${C.reset}\n`);
+  out.write(`\nRun:  ${C.bold}deep-claude --model ${defAlias}${C.reset}\n`);
   process.exit(0);
 }
 

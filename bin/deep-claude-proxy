@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 'use strict';
 
-// deep-router — a thin Anthropic-format passthrough proxy in front of
-// OpenRouter's native /v1/messages endpoint.
+// deep-claude-proxy — a thin Anthropic-format passthrough proxy in front of
+// OpenRouter's native /v1/messages endpoint. Booted by `deep-claude`.
 //
 // Claude Code speaks the Anthropic Messages API. OpenRouter *also* serves that
 // shape at POST /api/v1/messages and routes it to any model on the platform
@@ -15,7 +15,7 @@
 //   4. injects the server-side OpenRouter key,
 //   5. streams the response straight back.
 //
-// Config comes entirely from the environment (set by the deep-router wrapper):
+// Config comes entirely from the environment (set by deep-claude):
 //   OPENROUTER_API_KEY   required — server-side OpenRouter key (Bearer).
 //   ROUTER_MODELS        comma list of OpenRouter model ids to expose.
 //   ROUTER_ALIASES       comma list of alias=provider/model pairs.
@@ -60,7 +60,7 @@ for (const pair of (process.env.ROUTER_ALIASES || '').split(',')) {
 const ALLOWED = new Set([...MODELS, ...Object.values(ALIASES)]);
 
 function log(...args) {
-  if (DEBUG) console.error('[deep-router]', ...args);
+  if (DEBUG) console.error('[deep-claude]', ...args);
 }
 
 function resolveModel(model) {
@@ -329,8 +329,8 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.error(`[deep-router] listening on http://${HOST}:${PORT} -> ${UPSTREAM}`);
-  console.error(`[deep-router] exposing: ${[...ALLOWED].join(', ') || '(none — set ROUTER_MODELS/ROUTER_ALIASES)'}`);
+  console.error(`[deep-claude] listening on http://${HOST}:${PORT} -> ${UPSTREAM}`);
+  console.error(`[deep-claude] exposing: ${[...ALLOWED].join(', ') || '(none — set ROUTER_MODELS/ROUTER_ALIASES)'}`);
 });
 
 for (const sig of ['SIGINT', 'SIGTERM']) {
