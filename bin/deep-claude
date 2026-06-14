@@ -393,10 +393,16 @@ run_openrouter() {
   export ANTHROPIC_AUTH_TOKEN="router"
   export ANTHROPIC_API_KEY=""
   export ANTHROPIC_MODEL="$model"
-  export ANTHROPIC_DEFAULT_OPUS_MODEL="$model"
-  export ANTHROPIC_DEFAULT_SONNET_MODEL="$model"
-  export ANTHROPIC_DEFAULT_HAIKU_MODEL="$model"
-  export ANTHROPIC_SMALL_FAST_MODEL="$model"
+  # Map the switch slots (set by `deep-claude pick`) so /model can flip between
+  # them in-session. An unset slot falls back to the current model.
+  local s_opus s_sonnet s_haiku s_fable
+  s_opus="$(env_get ROUTER_SLOT_OPUS)"; s_sonnet="$(env_get ROUTER_SLOT_SONNET)"
+  s_haiku="$(env_get ROUTER_SLOT_HAIKU)"; s_fable="$(env_get ROUTER_SLOT_FABLE)"
+  export ANTHROPIC_DEFAULT_OPUS_MODEL="${s_opus:-$model}"
+  export ANTHROPIC_DEFAULT_SONNET_MODEL="${s_sonnet:-$model}"
+  export ANTHROPIC_DEFAULT_HAIKU_MODEL="${s_haiku:-$model}"
+  export ANTHROPIC_DEFAULT_FABLE_MODEL="${s_fable:-$model}"
+  export ANTHROPIC_SMALL_FAST_MODEL="${s_haiku:-$model}"
   export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY="1"
   export CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS="1"
 

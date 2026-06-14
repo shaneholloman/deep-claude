@@ -171,6 +171,75 @@ function runList({ title, rows, multi, preselect }) {
   });
 }
 
+// Assign chosen models to Claude Code's switch slots (Default + Fable/Opus/
+// Sonnet/Haiku). These map to ANTHROPIC_DEFAULT_*_MODEL so you can flip between
+// them with /model inside a session — works for any provider, not just Claude.
+// Returns { default, fable, opus, sonnet, haiku } (named may be null), or null.
+function assignSlots(chosenRows) {
+  return new Promise((resolve) => {
+    const models = chosenRows.map((r) => r.id);
+    const SLOTS = [
+      { key: 'default', name: 'Default', required: true },
+      { key: 'fable', name: 'Fable', required: false },
+      { key: 'opus', name: 'Opus', required: false },
+      { key: 'sonnet', name: 'Sonnet', required: false },
+      { key: 'haiku', name: 'Haiku', required: false },
+    ];
+    const optsFor = (s) => (s.required ? models : [null, ...models]);
+    const idx = {};
+    for (const s of SLOTS) {
+      if (s.required) { idx[s.key] = 0; continue; }
+      const hit = models.findIndex((m) => m.toLowerCase().includes(s.key)); // smart prefill
+      idx[s.key] = hit >= 0 ? hit + 1 : 0;
+    }
+    let cursor = 0;
+    const openedAt = Date.now();
+    const valLabel = (v) => (v ? v : `${C.gray}(use default)${C.reset}`);
+    const render = () => {
+      let s = '\x1b[H\x1b[2J';
+      s += `${C.bold}${C.cyan}  Assign quick-switch slots${C.reset}\n`;
+      s += `${C.gray}  These become Claude Code’s /model entries — flip models mid-session.${C.reset}\n`;
+      s += `${C.gray}  “Default” runs when you don’t pass --model. Leave a slot on “(use default)” to skip.${C.reset}\n\n`;
+      SLOTS.forEach((slot, i) => {
+        const cur = i === cursor;
+        const v = optsFor(slot)[idx[slot.key]];
+        const arrow = cur ? `${C.green}❯${C.reset}` : ' ';
+        const lhs = cur ? `${C.gray}‹${C.reset} ` : '  ';
+        const rhs = cur ? ` ${C.gray}›${C.reset}` : '';
+        s += `  ${arrow} ${C.bold}${slot.name.padEnd(8)}${C.reset} ${lhs}${valLabel(v)}${rhs}\n`;
+      });
+      s += `\n${C.gray}  ↑/↓ slot · ←/→ change model · ↵ save · esc cancel${C.reset}`;
+      out.write(s);
+    };
+    const onKey = (buf) => {
+      if (Date.now() - openedAt < 150) return;
+      const str = buf.toString();
+      let i = 0, dirty = false;
+      while (i < str.length) {
+        let k;
+        if (str[i] === '\x1b' && str[i + 1] === '[') { k = str.slice(i, i + 3); i += 3; }
+        else { k = str[i]; i += 1; }
+        if (k === '\x03' || k === '\x1b') { process.stdin.removeListener('data', onKey); return resolve(null); }
+        if (k === '\r' || k === '\n') {
+          process.stdin.removeListener('data', onKey);
+          const r = {};
+          for (const s of SLOTS) r[s.key] = optsFor(s)[idx[s.key]];
+          return resolve(r);
+        }
+        if (k === '\x1b[A') { cursor = (cursor - 1 + SLOTS.length) % SLOTS.length; dirty = true; continue; }
+        if (k === '\x1b[B') { cursor = (cursor + 1) % SLOTS.length; dirty = true; continue; }
+        if (k === '\x1b[C' || k === '\x1b[D') {
+          const s2 = SLOTS[cursor]; const opts = optsFor(s2); const dir = k === '\x1b[C' ? 1 : -1;
+          idx[s2.key] = (idx[s2.key] + dir + opts.length) % opts.length; dirty = true; continue;
+        }
+      }
+      if (dirty) render();
+    };
+    process.stdin.on('data', onKey);
+    render();
+  });
+}
+
 // ---- main ------------------------------------------------------------------
 async function main() {
   if (!API_KEY) fail('OPENROUTER_API_KEY is not set.');
@@ -217,14 +286,12 @@ async function main() {
   });
   if (chosen === null || chosen.length === 0) { teardown(); out.write('No changes made.\n'); process.exit(0); }
 
-  // Pick a default among the chosen.
+  // Assign chosen models to the switch slots.
   const chosenRows = rows.filter((r) => chosen.includes(r.id));
-  const def = await runList({
-    title: 'Pick the default model  (used when --model is omitted)',
-    rows: chosenRows, multi: false,
-  });
+  const slots = await assignSlots(chosenRows);
 
   teardown();
+  if (slots === null) { out.write('No changes made.\n'); process.exit(0); }
 
   // Auto-alias, uniquified.
   const aliases = [];
@@ -237,22 +304,26 @@ async function main() {
     used.add(n);
     aliases.push(`${n}=${id}`);
   }
-  const defModel = def && def[0] ? def[0] : chosen[0];
+  const defModel = slots.default || chosen[0];
   const defAlias = (aliases.find((p) => p.endsWith('=' + defModel)) || '=').split('=')[0] || defModel;
 
   envSet({
     ROUTER_MODELS: chosen.join(','),
     ROUTER_ALIASES: aliases.join(','),
     ROUTER_DEFAULT_MODEL: defAlias,
+    ROUTER_SLOT_FABLE: slots.fable || '',
+    ROUTER_SLOT_OPUS: slots.opus || '',
+    ROUTER_SLOT_SONNET: slots.sonnet || '',
+    ROUTER_SLOT_HAIKU: slots.haiku || '',
   });
 
   out.write(`\n${C.green}✓${C.reset} Saved ${C.bold}${chosen.length}${C.reset} models to ${C.cyan}${ENV_FILE}${C.reset}\n\n`);
-  for (const p of aliases) {
-    const [al, id] = p.split('=');
-    const mark = id === defModel ? `${C.yellow} (default)${C.reset}` : '';
-    out.write(`  ${C.green}${al.padEnd(18)}${C.reset}${C.gray}→${C.reset} ${id}${mark}\n`);
+  out.write(`  ${C.bold}Default${C.reset}  ${C.gray}→${C.reset} ${defModel}\n`);
+  for (const [name, id] of [['Fable', slots.fable], ['Opus', slots.opus], ['Sonnet', slots.sonnet], ['Haiku', slots.haiku]]) {
+    if (id) out.write(`  ${name.padEnd(7)}  ${C.gray}→${C.reset} ${id}   ${C.gray}(/model in-session)${C.reset}\n`);
   }
-  out.write(`\nRun:  ${C.bold}deep-claude --model ${defAlias}${C.reset}\n`);
+  out.write(`\n  ${C.gray}All ${chosen.length} are reachable with${C.reset} ${C.bold}deep-claude --model <alias>${C.reset}${C.gray}; aliases:${C.reset}\n`);
+  for (const p of aliases) out.write(`    ${C.green}${p.split('=')[0]}${C.reset}\n`);
   process.exit(0);
 }
 
