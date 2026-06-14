@@ -381,7 +381,10 @@ set_claude_state() {
   export XDG_CACHE_HOME="$STATE_DIR/cache"
   export XDG_DATA_HOME="$STATE_DIR/data"
   export XDG_STATE_HOME="$STATE_DIR/state"
-  [[ "${DEEP_CLAUDE_INHERIT:-}" == "1" ]] && inherit_config
+  # NB: use `if`, not `&& inherit_config` — a false `[[ ]]` as the function's
+  # last command would make set_claude_state return non-zero and, under set -e,
+  # abort the run for everyone who hasn't enabled inherit.
+  if [[ "${DEEP_CLAUDE_INHERIT:-}" == "1" ]]; then inherit_config; fi
 }
 
 # --- run: OpenRouter (default) ----------------------------------------------
