@@ -47,8 +47,13 @@ Personal endpoints (DeepSeek-direct, local models, self-hosted) are second-tier:
   deep-claude endpoints add deepseek https://api.deepseek.com/anthropic DEEPSEEK_API_KEY
   deep-claude --endpoint deepseek --model deepseek-v4-pro
 
+Use your existing Claude setup (skills, plugins, agents, workflows, MCP servers):
+  deep-claude --inherit                  for one run, or set DEEP_CLAUDE_INHERIT=1 in .env
+
 Environment:
   OPENROUTER_API_KEY   default-path key (env, .env, or Keychain -s deep-router -a openrouter).
+  DEEP_CLAUDE_INHERIT  "1" => link your ~/.claude skills/plugins/agents/etc. + MCP servers
+                         into deep-claude (your Anthropic login is never imported).
   CLAUDE_BIN           override the claude executable.
 EOF
 }
@@ -334,6 +339,39 @@ find_free_port() {
   printf '%s' "${ROUTER_PORT:-8787}"
 }
 
+# Bring the user's real ~/.claude config (skills, plugins, agents, workflows,
+# rules, hooks, commands, settings, CLAUDE.md) into the isolated home via
+# symlinks, and merge their MCP servers — but NOT the Anthropic login/history
+# (which would conflict with the OpenRouter routing). Opt in with
+# DEEP_CLAUDE_INHERIT=1 (.env) or the --inherit flag.
+inherit_config() {
+  local real="$HOME/.claude" dest="$STATE_DIR/home/.claude"
+  [[ -d "$real" ]] || return 0
+  mkdir -p "$dest"
+  local item src dst
+  for item in skills agents workflows rules hooks commands plugins settings.json CLAUDE.md; do
+    src="$real/$item"; dst="$dest/$item"
+    [[ -e "$src" ]] || continue
+    if [[ -L "$dst" ]]; then
+      ln -sfn "$src" "$dst"           # refresh existing symlink
+    else
+      [[ -e "$dst" ]] && rm -rf "$dst" # drop the isolated default, then link
+      ln -s "$src" "$dst"
+    fi
+  done
+  # Merge MCP servers from ~/.claude.json into the isolated config's .claude.json
+  # (config wins on conflict, so deep-claude-side additions are preserved).
+  if command -v node >/dev/null 2>&1 && [[ -f "$HOME/.claude.json" ]]; then
+    DC_SRC="$HOME/.claude.json" DC_DST="$dest/.claude.json" node -e '
+      const fs=require("fs");
+      let src={}; try{src=JSON.parse(fs.readFileSync(process.env.DC_SRC,"utf8"))}catch(e){}
+      let dst={}; try{dst=JSON.parse(fs.readFileSync(process.env.DC_DST,"utf8"))}catch(e){}
+      dst.mcpServers=Object.assign({}, src.mcpServers||{}, dst.mcpServers||{});
+      fs.writeFileSync(process.env.DC_DST, JSON.stringify(dst,null,2));
+    ' 2>/dev/null || true
+  fi
+}
+
 # Point Claude Code's state at our isolated home without touching $HOME (the
 # macOS login keychain lives under $HOME/Library/Keychains).
 set_claude_state() {
@@ -343,6 +381,7 @@ set_claude_state() {
   export XDG_CACHE_HOME="$STATE_DIR/cache"
   export XDG_DATA_HOME="$STATE_DIR/data"
   export XDG_STATE_HOME="$STATE_DIR/state"
+  [[ "${DEEP_CLAUDE_INHERIT:-}" == "1" ]] && inherit_config
 }
 
 # --- run: OpenRouter (default) ----------------------------------------------
@@ -442,6 +481,8 @@ run_main() {
       --api-key=*) api_key="${1#--api-key=}"; shift ;;
       --api-key-env) [[ $# -lt 2 ]] && { echo "deep-claude: --api-key-env needs a var name" >&2; exit 2; }; api_key_env="$2"; shift 2 ;;
       --api-key-env=*) api_key_env="${1#--api-key-env=}"; shift ;;
+      --inherit) export DEEP_CLAUDE_INHERIT=1; shift ;;
+      --no-inherit) export DEEP_CLAUDE_INHERIT=0; shift ;;
       *) args+=("$1"); shift ;;
     esac
   done
