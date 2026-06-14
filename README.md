@@ -158,9 +158,17 @@ deep-claude -p "explain this repo"         # non-interactive
 deep-claude --model gemini -- -p "hi"      # -- stops deep-claude's own option parsing
 ```
 
-Inside the session, `/model` lists exactly your curated set (via gateway discovery), and any
-sub-agent can pin any model from it. Everything other than `deep-claude`'s own flags passes straight
-through to `claude`.
+### Switching models inside a session
+
+Claude Code's in-session `/model` picker is Claude-centric — its gateway discovery only surfaces `anthropic/*` models. So `deep-claude pick` also lets you **assign your models to Claude Code's switch slots** (Default + Fable/Opus/Sonnet/Haiku). Those slots accept *any* provider, so after assigning (say) Gemini→Opus and Grok→Sonnet, you can flip between them mid-session with `/model` (the rows are labelled "Custom Opus/Sonnet/Haiku model" but point at whatever you assigned).
+
+Three ways to reach your models, then:
+
+- **`/model`** — your slot-assigned models (any provider) + any Claude models (gateway).
+- **`deep-claude --model <alias>`** — launch a session on *any* of your curated models.
+- **Sub-agents** — a sub-agent's `model:` frontmatter can pin *any* model in your set; the orchestrator and sub-agents run on different models concurrently (verified end-to-end via the proxy).
+
+Everything other than `deep-claude`'s own flags passes straight through to `claude`.
 
 > **Non-Claude reasoning models:** OpenRouter's Anthropic skin emits (out-of-order) `redacted_thinking`
 > blocks for models like Gemini, which would otherwise make Claude Code show an empty response. The
