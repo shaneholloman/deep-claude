@@ -241,4 +241,71 @@ sOR.listen(OR, '127.0.0.1', () => sDIR.listen(DIR, '127.0.0.1', () => {
 }));
 NODE
 
+# deep-claude proxy: survives a mid-stream upstream reset (ECONNRESET) instead of
+# crashing the whole process. Regression for the proxy dying mid-code-review and
+# leaving every later request with ConnectionRefused. Exercises BOTH streaming
+# paths (passthrough for anthropic/*, sse-strip for non-anthropic) then proves
+# the proxy still serves a clean request.
+node - <<'NODE'
+const http = require('http');
+const { spawn } = require('child_process');
+const UP = 8908, PROXY = 8909;
+let n = 0;
+function die(m) { console.error('FAIL:', m); process.exit(1); }
+const upstream = http.createServer((req, res) => {
+  let b = ''; req.on('data', c => (b += c));
+  req.on('end', () => {
+    n++;
+    if (n <= 2) {
+      // open an SSE stream, emit a couple events, then hard-reset the socket
+      // mid-stream — exactly what a flaky upstream does on a long request.
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write('event: message_start\ndata: {"type":"message_start","message":{"id":"m","type":"message","role":"assistant","content":[],"model":"x"}}\n\n');
+      res.write('event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n');
+      setTimeout(() => { try { res.socket.destroy(); } catch {} }, 20);
+    } else {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ id: 'ok', type: 'message', role: 'assistant', content: [{ type: 'text', text: 'alive' }], model: 'x' }));
+    }
+  });
+});
+upstream.listen(UP, '127.0.0.1', () => {
+  const proxy = spawn('node', [__dirname + '/bin/deep-claude-proxy'], {
+    env: { ...process.env, ROUTER_PORT: String(PROXY), OPENROUTER_API_KEY: 'k',
+      OPENROUTER_BASE_URL: `http://127.0.0.1:${UP}`,
+      ROUTER_MODELS: 'anthropic/y,google/x' },
+    stdio: 'ignore',
+  });
+  const done = (ok) => { proxy.kill(); upstream.close(); process.exit(ok ? 0 : 1); };
+  const post = (model) => fetch(`http://127.0.0.1:${PROXY}/v1/messages`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model, stream: true, max_tokens: 8, messages: [{ role: 'user', content: 'hi' }] }),
+  });
+  const alive = async () => { try { return (await fetch(`http://127.0.0.1:${PROXY}/health`)).ok; } catch { return false; } };
+  // A truncated stream must reach the client as truncated (threw, or partial
+  // body with no clean message_stop) — never masked as a complete response.
+  const readBroken = async (model) => { try { const r = await post(model); return await r.text(); } catch { return '__threw__'; } };
+  (async () => {
+    for (let i = 0; i < 50; i++) { if (await alive()) break; await new Promise(r => setTimeout(r, 100)); }
+    // 1) passthrough path (anthropic/*) — upstream resets mid-stream
+    const b1 = await readBroken('anthropic/y');
+    if (b1.includes('message_stop')) die('passthrough reset masked as a clean completion');
+    await new Promise(r => setTimeout(r, 150));
+    if (!(await alive())) die('proxy CRASHED after passthrough mid-stream reset');
+    // 2) sse-strip path (non-anthropic) — upstream resets mid-stream
+    const b2 = await readBroken('google/x');
+    if (b2.includes('message_stop')) die('sse-strip reset masked as a clean completion');
+    await new Promise(r => setTimeout(r, 150));
+    if (!(await alive())) die('proxy CRASHED after sse-strip mid-stream reset');
+    // 3) the proxy must still serve a clean request afterward
+    const ok = await (await fetch(`http://127.0.0.1:${PROXY}/v1/messages`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'anthropic/y', max_tokens: 8, messages: [{ role: 'user', content: 'hi' }] }),
+    })).json();
+    if (!(ok.content && ok.content[0] && ok.content[0].text === 'alive')) die('proxy did not recover: ' + JSON.stringify(ok));
+    done(true);
+  })().catch(e => { console.error(e); done(false); });
+});
+NODE
+
 echo "ok"

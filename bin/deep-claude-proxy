@@ -31,7 +31,7 @@
 //   ROUTER_DEBUG         "1" => log each request line to stderr.
 
 const http = require('http');
-const { Readable } = require('stream');
+const { Readable, pipeline } = require('stream');
 
 const PORT = parseInt(process.env.ROUTER_PORT || '8787', 10);
 const HOST = process.env.ROUTER_HOST || '127.0.0.1';
@@ -168,16 +168,26 @@ async function pipeSseStripThinking(webBody, res) {
     res.write((evType ? `event: ${evType}\n` : '') + `data: ${JSON.stringify(obj)}\n\n`);
   };
 
-  for await (const chunk of reader) {
-    buf += chunk.toString('utf8');
-    let i;
-    while ((i = buf.indexOf('\n\n')) !== -1) {
-      handleEvent(buf.slice(0, i));
-      buf = buf.slice(i + 2);
+  // A mid-stream upstream reset must not throw out of here uncaught — log it and
+  // close the client response so a single failed request can't crash the proxy.
+  try {
+    for await (const chunk of reader) {
+      buf += chunk.toString('utf8');
+      let i;
+      while ((i = buf.indexOf('\n\n')) !== -1) {
+        handleEvent(buf.slice(0, i));
+        buf = buf.slice(i + 2);
+      }
     }
+    if (buf.trim()) handleEvent(buf);
+    res.end();
+  } catch (err) {
+    // Truncated upstream: destroy (not a clean end()) so the client sees the
+    // stream was cut short and retries, rather than treating a partial response
+    // — missing message_stop — as a complete one.
+    log('stream error (sse-strip):', err.message);
+    try { res.destroy(err); } catch { /* already closed */ }
   }
-  if (buf.trim()) handleEvent(buf);
-  res.end();
 }
 
 function sendJson(res, status, obj) {
@@ -312,7 +322,13 @@ async function forward(req, res, path, raw) {
   if (!strip) {
     res.writeHead(upstream.status, ct ? { 'content-type': ct } : {});
     if (upstream.body) {
-      Readable.fromWeb(upstream.body).pipe(res);
+      // pipeline (not .pipe) so a mid-stream upstream reset (ECONNRESET) is
+      // handled and cleaned up instead of throwing an unhandled 'error' event
+      // that would crash the whole proxy. The client just sees a dropped
+      // connection and retries; the proxy stays up for every other request.
+      pipeline(Readable.fromWeb(upstream.body), res, (err) => {
+        if (err) log('stream error (passthrough):', err.message);
+      });
     } else {
       res.end();
     }
@@ -349,6 +365,11 @@ const server = http.createServer(async (req, res) => {
   const url = req.url || '';
   const path = url.split('?')[0];
 
+  // A client that hangs up mid-response (Claude Code cancelling a request, an
+  // aborted sub-agent) otherwise surfaces as an unhandled 'error' on res.
+  res.on('error', (err) => log('response error:', err.message));
+  req.on('error', (err) => log('request error:', err.message));
+
   if (req.method === 'GET' && (path === '/health' || path === '/')) {
     return sendJson(res, 200, { service: 'deep-claude-proxy', status: 'ok', upstream: UPSTREAM, models: [...ALLOWED] });
   }
@@ -363,7 +384,17 @@ const server = http.createServer(async (req, res) => {
     } catch (err) {
       return anthropicError(res, 413, 'invalid_request_error', err.message);
     }
-    return forward(req, res, path, raw);
+    // Catch any reject from forward() so a failure never leaves the client
+    // hanging until timeout: send an error if we haven't responded yet, else
+    // tear the connection down so the client retries.
+    try {
+      return await forward(req, res, path, raw);
+    } catch (err) {
+      log('forward error:', err.message);
+      if (!res.headersSent) return anthropicError(res, 502, 'api_error', `proxy error: ${err.message}`);
+      try { res.destroy(err); } catch { /* already closed */ }
+      return;
+    }
   }
 
   anthropicError(res, 404, 'not_found_error', `no route for ${req.method} ${path}`);
@@ -377,3 +408,14 @@ server.listen(PORT, HOST, () => {
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, () => server.close(() => process.exit(0)));
 }
+
+// Last-resort backstop: a proxy must never die because one request's stream
+// errored. Per-request handlers above catch the common cases; these guarantee a
+// stray async error (e.g. an undici socket reset surfacing late) is logged and
+// the process keeps serving every other session instead of exiting.
+process.on('uncaughtException', (err) => {
+  console.error('[deep-claude] uncaughtException (kept alive):', err && err.message);
+});
+process.on('unhandledRejection', (err) => {
+  console.error('[deep-claude] unhandledRejection (kept alive):', err && err.message);
+});
