@@ -46,9 +46,13 @@ swap the brain.
 - **One key, any model.** An OpenRouter key gets you Gemini, GPT, DeepSeek, Grok, Qwen, Claude, and
   hundreds more behind a single endpoint.
 - **A curated, pretty picker.** `deep-claude pick` is a searchable, multi-select TUI over the whole
-  catalog (with context windows and pricing). Your picks become Claude Code's `/model` list.
+  catalog (with context windows and pricing), and assigns your picks to Claude Code's switch slots so
+  you can flip between them in-session.
 - **Real multi-model workflows.** A sub-agent's `model:` accepts a full model id, so one workflow can
-  run many models at once — the orchestrator on one, sub-agents pinned to others.
+  run many models at once — the orchestrator on one, sub-agents pinned to others (proven end-to-end).
+- **Keep your setup.** `--inherit` brings your existing skills, agents, workflows, plugins, hooks, and
+  MCP servers along — without importing your Anthropic login. See
+  [Use your existing Claude setup](#use-your-existing-claude-setup-skills-plugins-mcp-).
 - **Zero contamination.** Session history, projects, MCP config, and `~/.claude.json` live in a
   private state dir — your normal Claude Code setup is untouched, and `$HOME` is left alone so the
   macOS keychain keeps working.
@@ -67,6 +71,7 @@ swap the brain.
 | `deep-claude models …`        | Curate the model set non-interactively.                      |
 | `deep-claude endpoints …`     | Manage personal (non-OpenRouter) endpoints.                  |
 | `deep-claude --endpoint NAME` | Run on a saved personal endpoint.                            |
+| `deep-claude --inherit`       | Bring in your real `~/.claude` skills/plugins/MCP/etc.       |
 
 ## Contents
 
@@ -127,7 +132,7 @@ deep-claude pick
 ```
 
 ```
-  Select models to expose  (these appear in Claude Code’s /model picker)
+  Select models to expose
   17/337 models  ·  2 selected
   search: gemini▏
 
@@ -136,7 +141,10 @@ deep-claude pick
     ↑/↓ move · space select · type to search · ↵ confirm · esc cancel
 ```
 
-The picker writes `ROUTER_MODELS` / `ROUTER_ALIASES` / `ROUTER_DEFAULT_MODEL` to `.env`. Curate non-interactively if you prefer:
+After selecting, a second screen lets you assign models to Claude Code's switch slots
+(Default + Fable/Opus/Sonnet/Haiku — see [Switching models](#switching-models-inside-a-session)). The
+picker writes `ROUTER_MODELS` / `ROUTER_ALIASES` / `ROUTER_DEFAULT_MODEL` / `ROUTER_SLOT_*` to `.env`.
+Curate non-interactively if you prefer:
 
 ```bash
 deep-claude models add google/gemini-3.5-flash      gemini   # id + optional alias
@@ -221,14 +229,20 @@ dependencies beyond `node`) in front of OpenRouter's native Anthropic Messages e
 Claude Code at it:
 
 ```
-ANTHROPIC_BASE_URL=http://127.0.0.1:8787      # the local proxy
-ANTHROPIC_AUTH_TOKEN=router                   # the proxy injects your real OpenRouter key
-CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1  # /model picker = your curated set
+ANTHROPIC_BASE_URL=http://127.0.0.1:<free port>   # the local proxy (8787+, auto-chosen)
+ANTHROPIC_AUTH_TOKEN=router                       # the proxy injects your real OpenRouter key
+CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1       # surfaces your Claude models in /model
+ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL  # your slot assignments (any provider)
 ```
 
-The proxy resolves model aliases, enforces your curated allow-list, injects the server-side OpenRouter
-key, strips the Anthropic-only `context_management` field (which 400s on non-Claude models), and strips
-the out-of-order `redacted_thinking` blocks described above.
+It picks a free local port (8787 is often taken by other dev servers). The proxy resolves model
+aliases, enforces your curated allow-list, injects the server-side OpenRouter key, strips the
+Anthropic-only `context_management` field (which 400s on non-Claude models), and strips the
+out-of-order `redacted_thinking` blocks described above. Its log goes to `.deep-claude-home/proxy.log`.
+
+> **About Claude Code's `/model` picker:** its built-in gateway discovery only lists `anthropic/*`
+> models. Non-Claude models reach `/model` via the **switch slots** you assign in `deep-claude pick`;
+> any model is always reachable with `deep-claude --model <alias>` or a sub-agent's `model:` field.
 
 **Personal-endpoint mode.** `deep-claude --endpoint …` / `--base-url …` sets `ANTHROPIC_BASE_URL` to
 the endpoint and talks to it directly — no proxy.
@@ -243,9 +257,9 @@ keeps working.
 | Path                     | Purpose                                                              |
 | ------------------------ | ------------------------------------------------------------------- |
 | `bin/deep-claude`        | The one command: run, `cli`, `pick`, `models`, `endpoints`.         |
-| `bin/deep-claude-cli`    | The Node first-run setup wizard (key entry + picker) (internal).    |
+| `bin/deep-claude-cli`    | The Node setup wizard's key-entry step (internal).                  |
+| `bin/deep-claude-pick`   | The Node interactive model picker + slot assignment (internal).     |
 | `bin/deep-claude-proxy`  | The Node Anthropic→OpenRouter passthrough proxy (internal).         |
-| `bin/deep-claude-pick`   | The Node interactive model picker (internal).                       |
 | `deep-claude`            | Top-level shim that `exec`s `bin/deep-claude`.                      |
 | `install.sh`             | Symlinks `deep-claude` into `~/.local/bin`.                         |
 | `test.sh`                | Syntax checks, arg-passthrough, CLI, and live proxy tests.          |
