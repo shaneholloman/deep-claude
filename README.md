@@ -170,6 +170,18 @@ Three ways to reach your models, then:
 
 Everything other than `deep-claude`'s own flags passes straight through to `claude`.
 
+### Use your existing Claude setup (skills, plugins, MCP, …)
+
+By default deep-claude runs in an isolated config, so it doesn't see your real `~/.claude`. To bring your **skills, agents, workflows, rules, hooks, plugins, `settings.json`, `CLAUDE.md`, and MCP servers** into the session:
+
+```bash
+deep-claude --inherit            # one run
+# …or persist it:
+echo 'DEEP_CLAUDE_INHERIT="1"' >> .env
+```
+
+It symlinks those config dirs/files and merges your MCP servers (from `~/.claude.json`) into the isolated home — but **never imports your Anthropic login or chat history**, so it can't conflict with the OpenRouter routing. Your real `~/.claude` is only read; deep-claude's own session history stays separate.
+
 > **Non-Claude reasoning models:** OpenRouter's Anthropic skin emits (out-of-order) `redacted_thinking`
 > blocks for models like Gemini, which would otherwise make Claude Code show an empty response. The
 > proxy strips those blocks for non-`anthropic/` models so the visible text comes through; genuine
